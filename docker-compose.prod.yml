@@ -1,0 +1,17 @@
+# Overlay de producción:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Exige claves explícitas: el control plane rechaza arrancar con claves de ejemplo.
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD}
+  control-plane:
+    environment:
+      NODE_ENV: production
+      API_KEYS: ${API_KEYS:?define API_KEYS con claves de >=24 caracteres (clave:ROL,...)}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?define INTERNAL_TOKEN}
+      METRICS_TOKEN: ${METRICS_TOKEN:?define METRICS_TOKEN}
+      DATABASE_URL: postgres://specterflow:${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD}@postgres:5432/specterflow
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+  worker:
+    environment:
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?define INTERNAL_TOKEN}

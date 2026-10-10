@@ -1,0 +1,127 @@
+# Entorno aislado de simulación. Red interna: solo el frontend (8080) y el control plane (3000) se publican.
+services:
+  redis:
+    image: redis:7-alpine
+    networks: [internal]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: specterflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-specterflow-dev}
+      POSTGRES_DB: specterflow
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U specterflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+
+  engine:
+    build: ./engine
+    mem_limit: 512m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLASSIFIER_MODEL: ${CLASSIFIER_MODEL:-claude-haiku-5-5}
+    networks: [internal]
+
+  control-plane:
+    build: ./control-plane
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://specterflow:${POSTGRES_PASSWORD:-specterflow-dev}@postgres:5432/specterflow
+      ENGINE_URL: http://engine:8000
+      API_KEYS: ${API_KEYS:-secops-key:SECOPS,finops-key:FINOPS,admin-key:ADMIN,viewer-key:VIEWER}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+      AUDIT_FILE: /data/audit.jsonl
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      MITIGATION_WEBHOOK_URL: ${MITIGATION_WEBHOOK_URL:-}
+      LIVE_CLASSIFY: ${LIVE_CLASSIFY:-false}
+      TRUST_PROXY: "true"
+      TARGET_ALLOWLIST: vulnerable-agent,hardened-agent
+      BUDGET_USD: ${BUDGET_USD:-5}
+      BUDGET_WINDOW_SEC: ${BUDGET_WINDOW_SEC:-60}
+      LOOP_REPEAT_THRESHOLD: ${LOOP_REPEAT_THRESHOLD:-5}
+      FAILURE_RATE_THRESHOLD: ${FAILURE_RATE_THRESHOLD:-0.5}
+    volumes: [audit:/data]
+    # Sin puerto publicado: se escala con `--scale control-plane=N` y se accede por el frontend (8080), que reparte entre réplicas.
+    depends_on:
+      redis: { condition: service_started }
+      engine: { condition: service_started }
+      postgres: { condition: service_healthy }
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [internal, public]
+
+  worker:
+    build: ./control-plane
+    command: ["node", "dist/worker.js"]
+    environment:
+      REDIS_URL: redis://redis:6379
+      ENGINE_URL: http://engine:8000
+      CONTROL_PLANE_URL: http://control-plane:3000
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+    depends_on: [redis, engine, control-plane]
+    networks: [internal]
+
+  # Executor de mitigaciones (opcional): docker compose --profile gateway up
+  # Activa en el control plane MITIGATION_WEBHOOK_URL=http://mitigation-executor:8200/v1/execute
+  mitigation-executor:
+    build: ./executor
+    profiles: [gateway]
+    environment:
+      EXECUTOR_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+      EXECUTOR_MODE: ${EXECUTOR_MODE:-dry-run}
+      CONNECTORS: ${EXECUTOR_CONNECTORS:-nginx}
+      KONG_ADMIN_URL: ${KONG_ADMIN_URL:-http://kong:8001}
+      KONG_ADMIN_TOKEN: ${KONG_ADMIN_TOKEN:-}
+      NGINX_RELOAD_CMD: ${NGINX_RELOAD_CMD:-}
+      VAULT_ADDR: ${VAULT_ADDR:-http://vault:8200}
+      VAULT_TOKEN: ${VAULT_TOKEN:-}
+    volumes: [executor-state:/data, gateway-conf:/etc/sf-gateway]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [internal]
+
+  frontend:
+    build: ./frontend
+    ports: ["8080:80"]
+    depends_on: [control-plane]
+    networks: [public]
+
+  # Objetivos del sandbox (agentes de prueba). Nunca apuntes campañas a sistemas reales sin autorización.
+  vulnerable-agent:
+    build: ./sandbox/vulnerable-agent
+    environment: { VULNERABLE: "true" }
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 100
+    networks: [internal]
+
+  hardened-agent:
+    build: ./sandbox/vulnerable-agent
+    environment: { VULNERABLE: "false" }
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 100
+    networks: [internal]
+
+networks:
+  internal:
+    internal: true
+  public: {}
+
+volumes:
+  audit: {}
+  pgdata: {}
+  executor-state: {}
+  gateway-conf: {}
