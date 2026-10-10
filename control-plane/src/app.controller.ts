@@ -92,6 +92,10 @@ export class AppController {
     return this.approvals.decide(id, req.principal, 'reject', b?.comment);
   }
 
+  @Roles('SECOPS') @Post('api/approvals/:id/execute') retryExecute(@Param('id') id: string) {
+    return this.approvals.retryExecution(id);
+  }
+
   // --- Auditoría ---
   @Get('api/audit') listAudit(@Query('limit') limit?: string) {
     return this.audit.list(limit ? Number(limit) : 200);

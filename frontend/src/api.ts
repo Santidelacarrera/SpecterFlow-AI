@@ -58,6 +58,7 @@ export interface Approval {
   status: 'pending' | 'approved' | 'rejected';
   createdAt: string;
   appliedAt?: string;
+  execution?: { status: 'ok' | 'failed'; attempts: number; detail: string; at: string };
 }
 export interface AuditEntry {
   seq: number;
@@ -94,6 +95,7 @@ export class Api {
   approvals = () => this.req<Approval[]>('/api/approvals');
   decide = (id: string, decision: 'approve' | 'reject', comment?: string) =>
     this.req<Approval>(`/api/approvals/${id}/${decision}`, { method: 'POST', body: JSON.stringify({ comment }) });
+  retryExecute = (id: string) => this.req<Approval>(`/api/approvals/${id}/execute`, { method: 'POST' });
   audit = () => this.req<AuditEntry[]>('/api/audit?limit=100');
   /** Stream SSE con cabecera x-api-key (EventSource no permite cabeceras). Devuelve la función de cierre. */
   stream(onEvent: (type: string) => void): () => void {

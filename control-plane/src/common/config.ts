@@ -7,6 +7,7 @@ export const cfg = () => ({
   internalToken: process.env.INTERNAL_TOKEN ?? 'dev-internal-token',
   auditFile: process.env.AUDIT_FILE,
   stateFile: process.env.STATE_FILE,
+  databaseUrl: process.env.DATABASE_URL,
   alertWebhookUrl: process.env.ALERT_WEBHOOK_URL,
   mitigationWebhookUrl: process.env.MITIGATION_WEBHOOK_URL,
   metricsToken: process.env.METRICS_TOKEN,

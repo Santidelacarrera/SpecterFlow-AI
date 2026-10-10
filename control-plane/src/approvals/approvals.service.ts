@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import { AgentsService } from '../agents/agents.service';
 import { AuditService } from '../audit/audit.service';
 import { cfg, Role } from '../common/config';
-import { Persistable, PersistenceService } from '../common/persistence.service';
+import { Entity, Persistable, PersistenceService } from '../common/persistence.service';
 import { EventsService } from '../events/events.service';
 import { MetricsService } from '../metrics/metrics.service';
 
@@ -30,6 +30,8 @@ export interface Approval {
   status: 'pending' | 'approved' | 'rejected';
   createdAt: string;
   appliedAt?: string;
+  /** Resultado de la ejecución en sistemas reales (MITIGATION_WEBHOOK_URL → executor). */
+  execution?: { status: 'ok' | 'failed'; attempts: number; detail: string; at: string };
 }
 
 type Proposal = Pick<Approval, 'incidentId' | 'action' | 'agentId' | 'params' | 'summary' | 'requiredRoles'>;
@@ -45,15 +47,19 @@ export class ApprovalsService implements Persistable {
     private readonly events: EventsService,
     private readonly metrics: MetricsService,
   ) {
-    persistence.register('approvals', this);
+    persistence.register(this);
     metrics.gauge('specterflow_approvals_pending', {}, () => this.items.filter((a) => a.status === 'pending').length);
   }
 
-  exportState() {
-    return this.items;
+  readonly kinds = ['approval'];
+
+  exportEntities(): Entity[] {
+    return this.items.map((a) => ({ kind: 'approval', id: a.id, data: a }));
   }
-  importState(d: Approval[]) {
-    this.items = d ?? [];
+  importEntity(_kind: string, id: string, data: Approval) {
+    const i = this.items.findIndex((x) => x.id === id);
+    if (i >= 0) this.items[i] = data;
+    else this.items.push(data);
   }
 
   propose(p: Proposal): Approval {
@@ -71,10 +77,15 @@ export class ApprovalsService implements Persistable {
   }
 
   list(status?: string): Approval[] {
-    return [...this.items].reverse().filter((a) => !status || a.status === status);
+    return [...this.items].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)).filter((a) => !status || a.status === status);
   }
 
-  decide(id: string, principal: { role: Role; keyId: string }, decision: 'approve' | 'reject', comment?: string): Approval {
+  /** Firma una aprobación. Con Postgres se serializa entre réplicas (lock + refresco) para no perder firmas. */
+  decide(id: string, principal: { role: Role; keyId: string }, decision: 'approve' | 'reject', comment?: string): Promise<Approval> {
+    return this.persistence.withLock(`approval:${id}`, () => this.decideLocked(id, principal, decision, comment));
+  }
+
+  private decideLocked(id: string, principal: { role: Role; keyId: string }, decision: 'approve' | 'reject', comment?: string): Approval {
     const a = this.items.find((x) => x.id === id);
     if (!a) throw new NotFoundException('approval not found');
     if (a.status !== 'pending') throw new ConflictException(`approval already ${a.status}`);
@@ -130,19 +141,43 @@ export class ApprovalsService implements Persistable {
   }
 
   /** Conector hacia sistemas reales (API Gateway, firewall, gestor de secretos) mediante webhook firmado por el control plane. */
-  private async notifyExecutor(a: Approval): Promise<void> {
+  async notifyExecutor(a: Approval, retryDelayMs = 1000): Promise<void> {
     const url = cfg().mitigationWebhookUrl;
-    if (!url) return;
-    try {
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-internal-token': cfg().internalToken },
-        body: JSON.stringify({ approvalId: a.id, action: a.action, agentId: a.agentId, params: a.params, signatures: a.signatures }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      this.audit.append('system', r.ok ? 'mitigation.executor_ok' : 'mitigation.executor_failed', { id: a.id, status: r.status });
-    } catch (e) {
-      this.audit.append('system', 'mitigation.executor_failed', { id: a.id, error: String(e) });
+    if (!url || a.status !== 'approved') return;
+    let detail = '';
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-internal-token': cfg().internalToken },
+          body: JSON.stringify({ approvalId: a.id, action: a.action, agentId: a.agentId, params: a.params, signatures: a.signatures }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        detail = `HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`;
+        if (r.ok) {
+          a.execution = { status: 'ok', attempts: attempt, detail, at: new Date().toISOString() };
+          this.audit.append('system', 'mitigation.executor_ok', { id: a.id, attempts: attempt });
+          this.persistence.touch();
+          return;
+        }
+        if (r.status >= 400 && r.status < 500 && r.status !== 429) break; // petición rechazada: reintentar no ayuda
+      } catch (e) {
+        detail = String(e);
+      }
+      if (attempt < 3) await new Promise((res) => setTimeout(res, retryDelayMs * 2 ** (attempt - 1)));
     }
+    a.execution = { status: 'failed', attempts: 3, detail, at: new Date().toISOString() };
+    this.audit.append('system', 'mitigation.executor_failed', { id: a.id, detail });
+    this.persistence.touch();
+    this.events.emit('mitigation', { id: a.id, executor: 'failed' }, `FALLÓ la ejecución real de ${a.action} sobre ${a.agentId}: ${detail.slice(0, 150)}`);
+  }
+
+  /** Reintento manual de la ejecución real (p. ej. tras arreglar el executor). */
+  async retryExecution(id: string): Promise<Approval> {
+    const a = this.items.find((x) => x.id === id);
+    if (!a) throw new NotFoundException('approval not found');
+    if (a.status !== 'approved') throw new BadRequestException('only approved mitigations can be executed');
+    await this.notifyExecutor(a);
+    return a;
   }
 }

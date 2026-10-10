@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { cfg } from '../common/config';
+import { Entity, Persistable, PersistenceService } from '../common/persistence.service';
 
 export type BreakerState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 export type TripReason = 'budget_exceeded' | 'infinite_loop' | 'failure_rate';
@@ -46,9 +47,35 @@ export const hashPrompt = (p: string) => createHash('sha1').update(p.trim().toLo
 
 /** Circuit breaker financiero y de IA, por agente. Lógica pura y determinista (reloj inyectable). */
 @Injectable()
-export class BreakerService {
+export class BreakerService implements Persistable {
   private agents = new Map<string, AgentBreaker>();
   now: () => number = () => Date.now();
+  /** Estado abierto/cerrado compartido entre réplicas. Las ventanas de métricas son locales: usa enrutado sticky por agente. */
+  private shared = new Map<string, { state: 'OPEN' | 'CLOSED'; openedAt: number; reason?: string }>();
+  readonly kinds = ['breaker'];
+
+  constructor(@Optional() private readonly persistence?: PersistenceService) {
+    persistence?.register(this);
+  }
+
+  exportEntities(): Entity[] {
+    return [...this.shared].map(([id, d]) => ({ kind: 'breaker', id, data: d }));
+  }
+  importEntity(_k: string, id: string, d: { state: 'OPEN' | 'CLOSED'; openedAt: number; reason?: string }) {
+    this.shared.set(id, d);
+    const a = this.get(id);
+    if (d.state === 'OPEN' && a.state === 'CLOSED') {
+      a.state = 'OPEN';
+      a.openedAt = d.openedAt;
+    } else if (d.state === 'CLOSED' && a.state !== 'CLOSED') {
+      a.state = 'CLOSED';
+      a.records = [];
+    }
+  }
+  private share(id: string, state: 'OPEN' | 'CLOSED', reason?: string) {
+    this.shared.set(id, { state, openedAt: this.now(), reason });
+    this.persistence?.touch();
+  }
 
   private get(agentId: string): AgentBreaker {
     let a = this.agents.get(agentId);
@@ -83,6 +110,7 @@ export class BreakerService {
       if (rec.ok) {
         a.state = 'CLOSED';
         a.records = [];
+        this.share(agentId, 'CLOSED');
         return null;
       }
       return this.trip(agentId, a, 'failure_rate', 'La petición de prueba (half-open) falló');
@@ -121,6 +149,7 @@ export class BreakerService {
   private trip(agentId: string, a: AgentBreaker, reason: TripReason, detail: string): Trip {
     a.state = 'OPEN';
     a.openedAt = this.now();
+    this.share(agentId, 'OPEN', reason);
     const ips = new Map<string, number>();
     for (const r of a.records) ips.set(r.sourceIp, (ips.get(r.sourceIp) ?? 0) + 1);
     const top = [...ips.entries()].sort((x, y) => y[1] - x[1])[0]?.[0];
@@ -138,6 +167,7 @@ export class BreakerService {
 
   reset(agentId: string): void {
     this.agents.delete(agentId);
+    if (this.shared.has(agentId)) this.share(agentId, 'CLOSED');
   }
 
   status(agentId: string) {

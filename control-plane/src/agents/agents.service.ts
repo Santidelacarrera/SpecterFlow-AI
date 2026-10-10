@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { Persistable, PersistenceService } from '../common/persistence.service';
+import { randomUUID } from 'crypto';
+import { Entity, Persistable, PersistenceService } from '../common/persistence.service';
 
 export interface Agent {
   id: string;
@@ -23,17 +24,27 @@ export class AgentsService implements Persistable {
   private blockedIps = new Set<string>();
   private rules: GatewayRule[] = [];
 
+  readonly kinds = ['agent', 'rule', 'blocked_ip'];
+
   constructor(private readonly persistence: PersistenceService) {
-    persistence.register('agents', this);
+    persistence.register(this);
   }
 
-  exportState() {
-    return { agents: [...this.agents.values()], blockedIps: [...this.blockedIps], rules: this.rules };
+  exportEntities(): Entity[] {
+    return [
+      ...[...this.agents.values()].map((a) => ({ kind: 'agent', id: a.id, data: a })),
+      ...this.rules.map((r) => ({ kind: 'rule', id: r.id, data: r })),
+      ...[...this.blockedIps].map((ip) => ({ kind: 'blocked_ip', id: ip, data: { ip } })),
+    ];
   }
-  importState(d: any) {
-    this.agents = new Map((d.agents ?? []).map((a: Agent) => [a.id, a]));
-    this.blockedIps = new Set(d.blockedIps ?? []);
-    this.rules = d.rules ?? [];
+  importEntity(kind: string, id: string, data: any) {
+    if (kind === 'agent') this.agents.set(id, data);
+    else if (kind === 'blocked_ip') this.blockedIps.add(data.ip);
+    else if (kind === 'rule') {
+      const i = this.rules.findIndex((r) => r.id === id);
+      if (i >= 0) this.rules[i] = data;
+      else this.rules.push(data);
+    }
   }
 
   register(id: string, url: string): Agent {
@@ -93,7 +104,7 @@ export class AgentsService implements Persistable {
 
   addRule(agentId: string, pattern: string, reason: string): GatewayRule {
     new RegExp(pattern); // valida
-    const rule = { id: `rule-${this.rules.length + 1}`, agentId, pattern, reason, createdAt: new Date().toISOString() };
+    const rule = { id: `rule-${randomUUID().slice(0, 8)}`, agentId, pattern, reason, createdAt: new Date().toISOString() };
     this.rules.push(rule);
     this.persistence.touch();
     return rule;

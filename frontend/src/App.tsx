@@ -220,6 +220,12 @@ function Approvals({ approvals, api, refresh, canSign }: { approvals: Approval[]
             <div className="row"><button onClick={() => act(a.id, 'approve')}>Aprobar</button><button className="danger" onClick={() => act(a.id, 'reject')}>Rechazar</button></div>
           )}
           {a.appliedAt && <div className="muted">Aplicada {new Date(a.appliedAt).toLocaleString()}</div>}
+          {a.execution && (
+            <div className={a.execution.status === 'ok' ? 'muted' : 'err'}>
+              Ejecución en el gateway: {a.execution.status === 'ok' ? '✔ correcta' : '✘ fallida'} ({a.execution.attempts} intento/s) — {a.execution.detail.slice(0, 160)}
+              {a.execution.status === 'failed' && canSign && <button onClick={async () => { await api.retryExecute(a.id).catch((e) => alert(e.message)); refresh(); }}>Reintentar</button>}
+            </div>
+          )}
         </div>
       ))}
       {!approvals.length && <p className="empty">Nada que aprobar.</p>}

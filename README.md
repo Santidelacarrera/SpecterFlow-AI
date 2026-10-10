@@ -49,31 +49,47 @@ SpecterFlow AI simula ataques contra ecosistemas de Agentes de IA y microservici
 | Cola de trabajos BullMQ + Redis y worker separado | `control-plane/src/campaigns`, `worker.ts` | ✅ |
 | Frontend React + TS: resumen con diagrama de flujo, campañas, incidentes/evidencia, aprobaciones, auditoría | `frontend/` | ✅ |
 | Sandbox con agente vulnerable / endurecido | `sandbox/vulnerable-agent` | ✅ |
+| Executor de mitigaciones (Kong / NGINX / Vault) | `executor/` | ✅ (probado con dobles) |
+| Estado en Postgres, multi-réplica | `control-plane/src/common/persistence.service.ts` | ✅ |
 
 ### Producción y operación
 
 | Capacidad | Detalle |
 |---|---|
-| Persistencia | `STATE_FILE` guarda agentes, reglas, IPs bloqueadas, incidentes, aprobaciones y campañas (escritura atómica); las mitigaciones aprobadas sobreviven a reinicios. `AUDIT_FILE` guarda la cadena de auditoría. |
+| Persistencia / HA | Con `DATABASE_URL` (Postgres) el estado se guarda por entidades y **varias réplicas del control plane comparten estado**: sincronización por secuencia global, firmas de aprobación serializadas con advisory locks (no se pierden firmas concurrentes), una única cadena de auditoría compartida y estado del breaker (abierto/cerrado) propagado. Sin Postgres: `STATE_FILE` (una sola instancia) o memoria. Las ventanas de coste/bucle del breaker son locales a cada réplica → enruta por agente de forma *sticky* si escalas el proxy. |
+| Executor de mitigaciones | Servicio `executor/` que recibe las mitigaciones aprobadas y las aplica en sistemas reales mediante conectores: **Kong** (ip-restriction, request-termination, pre-function con la regla regex, rotación key-auth), **NGINX** (ficheros `include` + recarga) y **Vault KV v2** (secreto rotado). Dry-run por defecto, idempotente por `approvalId`, validación estricta de parámetros, reintentos y estado visible en la bandeja (con reintento manual). |
 | Arranque seguro | Con `NODE_ENV=production` el control plane rechaza claves de ejemplo, claves < 24 caracteres y `INTERNAL_TOKEN` por defecto. Usa `docker-compose.prod.yml`. |
 | Hardening HTTP | Cabeceras de seguridad, rate limit por clave (`RATE_LIMIT_PER_MIN`), límite de body (`BODY_LIMIT`), CORS cerrado por defecto (`CORS_ORIGIN`). |
 | Métricas | `GET /metrics` (Prometheus; `Authorization: Bearer $METRICS_TOKEN`): peticiones, tokens, coste, trips del breaker, incidentes, mitigaciones, aprobaciones pendientes. |
 | Alertas | `ALERT_WEBHOOK_URL` (formato Slack/Mattermost/Teams) en breaker abierto, incidente y aprobación pendiente. |
-| Mitigación real | `MITIGATION_WEBHOOK_URL` recibe cada mitigación aprobada (con firmas) para ejecutarla en tu gateway/firewall/gestor de secretos. Sin él, solo se aplica dentro del proxy de SpecterFlow. |
+| Mitigación real | `MITIGATION_WEBHOOK_URL` (→ `executor`, ver abajo) recibe cada mitigación aprobada con sus firmas. Sin él, solo se aplica dentro del proxy de SpecterFlow. |
 | Tiempo real | `GET /api/events` (SSE) alimenta la UI. |
 | Tráfico real | `LIVE_CLASSIFY=true` clasifica en vivo (vía engine) las respuestas del proxy y abre incidentes ante secretos o herramientas privilegiadas. |
 | Bucles | Detección por prompt idéntico y por prompts casi idénticos (similitud Jaccard, `LOOP_SIMILARITY`). |
 | Ataques propios | JSON en `ATTACKS_DIR` (ver `engine/attacks.d/example.json.disabled`). |
 | Contenedores | Usuarios no root, healthchecks, `cap_drop: ALL`, `no-new-privileges`, límites de memoria/PIDs y FS de solo lectura en el sandbox. |
-| CI | `.github/workflows/ci.yml`: tests, typecheck, build, integración con Redis + worker (`scripts/integration.sh`) y build de imágenes. |
+| CI | `.github/workflows/ci.yml`: tests (con Postgres real), typecheck, build, integración con Redis + worker + executor (`scripts/integration.sh`), integración HA con 2 réplicas (`scripts/integration-ha.sh`) y build de imágenes. |
+
+### Executor de mitigaciones (gateway real)
+
+```bash
+# 1) Variables (.env): INTERNAL_TOKEN, EXECUTOR_CONNECTORS=kong,vault (o nginx), KONG_ADMIN_URL, VAULT_ADDR/VAULT_TOKEN...
+# 2) Arranca con el perfil y apunta el control plane al executor
+MITIGATION_WEBHOOK_URL=http://mitigation-executor:8200/v1/execute docker compose --profile gateway up
+# 3) EXECUTOR_MODE=dry-run (por defecto) solo muestra el plan; pasa a live cuando lo hayas revisado
+```
+
+Cada acción se traduce así: `BLOCK_IP` → `ip-restriction.deny` global (Kong) / `blocked_ips.conf` (NGINX); `PAUSE_AGENT` → `request-termination` 423 / `paused_agents.conf`; `PATCH_GATEWAY_RULE` → plugin `pre-function` con la regex / `rules.conf`; `ROTATE_KEYS` → nueva credencial key-auth, revocación de las antiguas y escritura de la nueva en Vault (la clave nunca viaja al control plane). Los snippets de `include` para nginx están documentados en `executor/app/connectors.py`.
+
+> Los conectores están probados contra dobles de la Admin API de Kong y de Vault y contra ficheros reales de nginx; no he podido probarlos contra una instancia real de Kong/Vault. Pruébalos en dry-run y en un entorno de staging antes de activarlos.
 
 ## Arranque rápido
 
 ```bash
 cp .env.example .env
 docker compose up --build
-# UI:           http://localhost:8080   (API keys de ejemplo: secops-key, finops-key, admin-key, viewer-key)
-# Control plane: http://localhost:3000
+# UI y API:  http://localhost:8080   (API keys de ejemplo: secops-key, finops-key, admin-key, viewer-key)
+# Alta disponibilidad:  docker compose up --build --scale control-plane=2
 ```
 
 1. Entra con `secops-key`, registra el agente `demo` → `http://vulnerable-agent:9000`.
@@ -117,9 +133,12 @@ La interrupción es **temporal y automática**; la mitigación **permanente** re
 cd engine && pip install -r requirements.txt && pytest          # engine + sandbox end-to-end
 cd control-plane && npm ci && npm test                          # breaker, auditoría, proxy, aprobaciones, campañas
 cd frontend && npm ci && npm run build                          # typecheck + build
-PYBIN=python3 scripts/integration.sh                            # Redis + worker BullMQ separado (requiere redis-server)
+cd executor && pip install -r requirements.txt && pytest        # conectores (Kong/Vault/NGINX)
+PYBIN=python3 scripts/integration.sh                            # Redis + worker + executor (requiere redis-server)
+DATABASE_URL=postgres://... scripts/integration-ha.sh           # 2 réplicas + Postgres
+TEST_DATABASE_URL=postgres://... npm test                       # incluye los tests HA contra Postgres
 ```
 
 ## Uso responsable
 
-Los payloads son canarios inofensivos y las herramientas del agente de prueba son simuladas. Ejecuta campañas **solo contra sistemas propios o con autorización expresa**. Las API keys de ejemplo son para desarrollo: cámbialas antes de exponer el servicio. El estado se persiste en un fichero JSON (suficiente para una sola instancia); para alta disponibilidad o varias réplicas habría que migrarlo a una base de datos.
+Los payloads son canarios inofensivos y las herramientas del agente de prueba son simuladas. Ejecuta campañas **solo contra sistemas propios o con autorización expresa**. Las API keys de ejemplo son para desarrollo: cámbialas antes de exponer el servicio. El estado vive en Postgres (o en un JSON/memoria en modo de una sola instancia). La identidad sigue siendo por API key; para producción conviene SSO/OIDC.

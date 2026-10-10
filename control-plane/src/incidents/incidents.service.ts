@@ -4,7 +4,7 @@ import { AuditService } from '../audit/audit.service';
 import { Trip } from '../breaker/breaker.service';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { AgentsService } from '../agents/agents.service';
-import { Persistable, PersistenceService } from '../common/persistence.service';
+import { Entity, Persistable, PersistenceService } from '../common/persistence.service';
 import { EventsService } from '../events/events.service';
 import { MetricsService } from '../metrics/metrics.service';
 
@@ -44,14 +44,18 @@ export class IncidentsService implements Persistable {
     private readonly events: EventsService,
     private readonly metrics: MetricsService,
   ) {
-    persistence.register('incidents', this);
+    persistence.register(this);
   }
 
-  exportState() {
-    return this.incidents;
+  readonly kinds = ['incident'];
+
+  exportEntities(): Entity[] {
+    return this.incidents.map((i) => ({ kind: 'incident', id: i.id, data: i }));
   }
-  importState(d: Incident[]) {
-    this.incidents = d ?? [];
+  importEntity(_kind: string, id: string, data: Incident) {
+    const i = this.incidents.findIndex((x) => x.id === id);
+    if (i >= 0) this.incidents[i] = data;
+    else this.incidents.push(data);
   }
 
   private record(i: Incident): void {
@@ -81,7 +85,7 @@ export class IncidentsService implements Persistable {
   }
 
   list(): Incident[] {
-    return [...this.incidents].reverse();
+    return [...this.incidents].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   }
   get(id: string): Incident | undefined {
     return this.incidents.find((i) => i.id === id);

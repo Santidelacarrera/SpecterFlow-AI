@@ -9,6 +9,7 @@ import { AuditService } from '../src/audit/audit.service';
 import { BreakerService, jaccard, promptWords } from '../src/breaker/breaker.service';
 import { assertProductionConfig } from '../src/common/config';
 import { PersistenceService } from '../src/common/persistence.service';
+import { PgService } from '../src/common/pg.service';
 import { rateLimiter, securityHeaders } from '../src/common/security';
 import { EventsService } from '../src/events/events.service';
 import { MetricsService } from '../src/metrics/metrics.service';
@@ -32,25 +33,26 @@ describe('semantic loop detection', () => {
   });
 });
 
-describe('persistence', () => {
-  it('survives a restart: agents, mitigations and approvals', () => {
+describe('persistence (file)', () => {
+  it('survives a restart: agents, mitigations and approvals', async () => {
     const file = join(mkdtempSync(join(tmpdir(), 'sf-')), 'state.json');
     process.env.STATE_FILE = file;
-    const build = () => {
-      const p = new PersistenceService();
+    const build = async () => {
+      const p = new PersistenceService(new PgService());
       const audit = new AuditService();
       const agents = new AgentsService(p);
       const ap = new ApprovalsService(audit, agents, p, new EventsService(), new MetricsService());
+      await p.init();
       return { p, agents, ap };
     };
-    const a = build();
+    const a = await build();
     a.agents.register('x1', 'http://localhost:9');
     const prop = a.ap.propose({ incidentId: 'i', action: 'BLOCK_IP', agentId: 'x1', params: { ip: '6.6.6.6' }, summary: 's', requiredRoles: ['SECOPS'] });
-    a.ap.decide(prop.id, { role: 'SECOPS', keyId: 'k1' }, 'approve');
-    a.p.flush();
-    expect(JSON.parse(readFileSync(file, 'utf8')).agents.blockedIps).toContain('6.6.6.6');
+    await a.ap.decide(prop.id, { role: 'SECOPS', keyId: 'k1' }, 'approve');
+    await a.p.flush();
+    expect(readFileSync(file, 'utf8')).toContain('6.6.6.6');
 
-    const b = build();
+    const b = await build();
     expect(b.agents.get('x1')).toBeDefined();
     expect(b.agents.isBlocked('6.6.6.6')).toBe(true);
     expect(b.ap.list()[0]).toMatchObject({ status: 'approved' });
@@ -96,5 +98,41 @@ describe('metrics', () => {
     m.gauge('g', {}, () => 7);
     expect(m.render()).toContain('c_total{a="x"} 2');
     expect(m.render()).toContain('g{} 7');
+  });
+});
+
+describe('mitigation executor webhook', () => {
+  it('retries transient failures, records the outcome and does not retry 4xx', async () => {
+    const { createServer } = await import('http');
+    let calls = 0;
+    let mode: 'flaky' | 'reject' = 'flaky';
+    const srv = createServer((req, res) => {
+      calls++;
+      req.resume();
+      if (mode === 'flaky' && calls < 3) return void res.writeHead(503).end('down');
+      if (mode === 'reject') return void res.writeHead(422).end('bad params');
+      res.writeHead(200).end('{"ok":true}');
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    process.env.MITIGATION_WEBHOOK_URL = `http://127.0.0.1:${(srv.address() as any).port}`;
+    const p = new PersistenceService(new PgService());
+    const audit = new AuditService();
+    const agents = new AgentsService(p);
+    const ap = new ApprovalsService(audit, agents, p, new EventsService(), new MetricsService());
+    agents.register('x1', 'http://localhost:9');
+    const a = ap.propose({ incidentId: 'i', action: 'BLOCK_IP', agentId: 'x1', params: { ip: '6.6.6.6' }, summary: 's', requiredRoles: ['SECOPS'] });
+    await ap.decide(a.id, { role: 'SECOPS', keyId: 'k' }, 'approve');
+    await ap.notifyExecutor(a, 1); // la 1ª llamada (en apply) ya está en vuelo; esta fuerza el resultado final
+    await new Promise((r) => setTimeout(r, 50));
+    expect(a.execution?.status).toBe('ok');
+
+    mode = 'reject';
+    calls = 0;
+    await ap.notifyExecutor(a, 1);
+    expect(calls).toBe(1);
+    expect(a.execution?.status).toBe('failed');
+    expect(a.execution?.detail).toContain('422');
+    delete process.env.MITIGATION_WEBHOOK_URL;
+    srv.close();
   });
 });

@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto';
 import { AgentsService } from '../agents/agents.service';
 import { AuditService } from '../audit/audit.service';
 import { cfg } from '../common/config';
-import { Persistable, PersistenceService } from '../common/persistence.service';
+import { Entity, Persistable, PersistenceService } from '../common/persistence.service';
 import { EventsService } from '../events/events.service';
 import { IncidentsService } from '../incidents/incidents.service';
 
@@ -55,17 +55,18 @@ export class CampaignsService implements OnModuleInit, OnModuleDestroy, Persista
     private readonly persistence: PersistenceService,
     private readonly events: EventsService,
   ) {
-    persistence.register('campaigns', this);
+    persistence.register(this);
   }
 
-  exportState() {
-    return [...this.campaigns.values()];
+  readonly kinds = ['campaign'];
+
+  exportEntities(): Entity[] {
+    return [...this.campaigns.values()].map((c) => ({ kind: 'campaign', id: c.id, data: c }));
   }
-  importState(d: Campaign[]) {
-    // Las campañas que estaban en curso al caer el proceso se marcan como fallidas.
-    this.campaigns = new Map(
-      (d ?? []).map((c) => [c.id, ['queued', 'running'].includes(c.status) ? { ...c, status: 'failed' as const, error: 'interrumpida por reinicio' } : c]),
-    );
+  importEntity(_kind: string, id: string, data: Campaign) {
+    // Una campaña "en curso" desde hace más de CAMPAIGN_STALE_MIN minutos (proceso caído) se da por fallida.
+    const stale = Date.now() - Date.parse(data.createdAt) > Number(process.env.CAMPAIGN_STALE_MIN ?? 10) * 60_000;
+    this.campaigns.set(id, ['queued', 'running'].includes(data.status) && stale ? { ...data, status: 'failed', error: 'interrumpida (sin finalizar)' } : data);
   }
 
   onModuleInit() {
@@ -127,7 +128,10 @@ export class CampaignsService implements OnModuleInit, OnModuleDestroy, Persista
 
   /** Llamado con el reporte del engine (desde el worker interno o el endpoint /internal). */
   complete(job: CampaignJob, report: any) {
-    const c = this.campaigns.get(job.campaignId);
+    // Si el resultado llega a otra réplica antes de sincronizar, se crea el registro a partir del job.
+    const c =
+      this.campaigns.get(job.campaignId) ??
+      this.campaigns.set(job.campaignId, { id: job.campaignId, targetUrl: job.targetUrl, agentId: job.agentId, status: 'running', createdAt: new Date().toISOString() }).get(job.campaignId);
     const created = this.incidents.fromCampaign(report, job.agentId);
     if (c) {
       c.status = 'done';
