@@ -1,0 +1,66 @@
+# Entorno aislado de simulación. Red interna: solo el frontend (8080) y el control plane (3000) se publican.
+services:
+  redis:
+    image: redis:7-alpine
+    networks: [internal]
+
+  engine:
+    build: ./engine
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLASSIFIER_MODEL: ${CLASSIFIER_MODEL:-claude-haiku-5-5}
+    networks: [internal]
+
+  control-plane:
+    build: ./control-plane
+    environment:
+      REDIS_URL: redis://redis:6379
+      ENGINE_URL: http://engine:8000
+      API_KEYS: ${API_KEYS:-secops-key:SECOPS,finops-key:FINOPS,admin-key:ADMIN,viewer-key:VIEWER}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+      AUDIT_FILE: /data/audit.jsonl
+      TARGET_ALLOWLIST: vulnerable-agent,hardened-agent
+      BUDGET_USD: ${BUDGET_USD:-5}
+      BUDGET_WINDOW_SEC: ${BUDGET_WINDOW_SEC:-60}
+      LOOP_REPEAT_THRESHOLD: ${LOOP_REPEAT_THRESHOLD:-5}
+      FAILURE_RATE_THRESHOLD: ${FAILURE_RATE_THRESHOLD:-0.5}
+    volumes: [audit:/data]
+    ports: ["3000:3000"]
+    depends_on: [redis, engine]
+    networks: [internal, public]
+
+  worker:
+    build: ./control-plane
+    command: ["node", "dist/worker.js"]
+    environment:
+      REDIS_URL: redis://redis:6379
+      ENGINE_URL: http://engine:8000
+      CONTROL_PLANE_URL: http://control-plane:3000
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+    depends_on: [redis, engine, control-plane]
+    networks: [internal]
+
+  frontend:
+    build: ./frontend
+    ports: ["8080:80"]
+    depends_on: [control-plane]
+    networks: [public]
+
+  # Objetivos del sandbox (agentes de prueba). Nunca apuntes campañas a sistemas reales sin autorización.
+  vulnerable-agent:
+    build: ./sandbox/vulnerable-agent
+    environment: { VULNERABLE: "true" }
+    networks: [internal]
+
+  hardened-agent:
+    build: ./sandbox/vulnerable-agent
+    environment: { VULNERABLE: "false" }
+    networks: [internal]
+
+networks:
+  internal:
+    internal: true
+  public: {}
+
+volumes:
+  audit: {}
