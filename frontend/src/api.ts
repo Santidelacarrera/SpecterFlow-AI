@@ -95,5 +95,40 @@ export class Api {
   decide = (id: string, decision: 'approve' | 'reject', comment?: string) =>
     this.req<Approval>(`/api/approvals/${id}/${decision}`, { method: 'POST', body: JSON.stringify({ comment }) });
   audit = () => this.req<AuditEntry[]>('/api/audit?limit=100');
+  /** Stream SSE con cabecera x-api-key (EventSource no permite cabeceras). Devuelve la función de cierre. */
+  stream(onEvent: (type: string) => void): () => void {
+    const ctrl = new AbortController();
+    let stopped = false;
+    const run = async () => {
+      while (!stopped) {
+        try {
+          const r = await fetch('/api/events', { headers: { 'x-api-key': this.key }, signal: ctrl.signal });
+          if (!r.ok || !r.body) throw new Error(String(r.status));
+          const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
+          let buf = '';
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += value;
+            let i: number;
+            while ((i = buf.indexOf('\n\n')) >= 0) {
+              const block = buf.slice(0, i);
+              buf = buf.slice(i + 2);
+              const m = /^event: (\w+)/m.exec(block);
+              if (m) onEvent(m[1]);
+            }
+          }
+        } catch {
+          if (stopped) return;
+        }
+        await new Promise((res) => setTimeout(res, 3000)); // reconexión
+      }
+    };
+    void run();
+    return () => {
+      stopped = true;
+      ctrl.abort();
+    };
+  }
   verifyAudit = () => this.req<{ valid: boolean; length: number; brokenAt?: number }>('/api/audit/verify');
 }

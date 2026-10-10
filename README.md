@@ -50,6 +50,23 @@ SpecterFlow AI simula ataques contra ecosistemas de Agentes de IA y microservici
 | Frontend React + TS: resumen con diagrama de flujo, campañas, incidentes/evidencia, aprobaciones, auditoría | `frontend/` | ✅ |
 | Sandbox con agente vulnerable / endurecido | `sandbox/vulnerable-agent` | ✅ |
 
+### Producción y operación
+
+| Capacidad | Detalle |
+|---|---|
+| Persistencia | `STATE_FILE` guarda agentes, reglas, IPs bloqueadas, incidentes, aprobaciones y campañas (escritura atómica); las mitigaciones aprobadas sobreviven a reinicios. `AUDIT_FILE` guarda la cadena de auditoría. |
+| Arranque seguro | Con `NODE_ENV=production` el control plane rechaza claves de ejemplo, claves < 24 caracteres y `INTERNAL_TOKEN` por defecto. Usa `docker-compose.prod.yml`. |
+| Hardening HTTP | Cabeceras de seguridad, rate limit por clave (`RATE_LIMIT_PER_MIN`), límite de body (`BODY_LIMIT`), CORS cerrado por defecto (`CORS_ORIGIN`). |
+| Métricas | `GET /metrics` (Prometheus; `Authorization: Bearer $METRICS_TOKEN`): peticiones, tokens, coste, trips del breaker, incidentes, mitigaciones, aprobaciones pendientes. |
+| Alertas | `ALERT_WEBHOOK_URL` (formato Slack/Mattermost/Teams) en breaker abierto, incidente y aprobación pendiente. |
+| Mitigación real | `MITIGATION_WEBHOOK_URL` recibe cada mitigación aprobada (con firmas) para ejecutarla en tu gateway/firewall/gestor de secretos. Sin él, solo se aplica dentro del proxy de SpecterFlow. |
+| Tiempo real | `GET /api/events` (SSE) alimenta la UI. |
+| Tráfico real | `LIVE_CLASSIFY=true` clasifica en vivo (vía engine) las respuestas del proxy y abre incidentes ante secretos o herramientas privilegiadas. |
+| Bucles | Detección por prompt idéntico y por prompts casi idénticos (similitud Jaccard, `LOOP_SIMILARITY`). |
+| Ataques propios | JSON en `ATTACKS_DIR` (ver `engine/attacks.d/example.json.disabled`). |
+| Contenedores | Usuarios no root, healthchecks, `cap_drop: ALL`, `no-new-privileges`, límites de memoria/PIDs y FS de solo lectura en el sandbox. |
+| CI | `.github/workflows/ci.yml`: tests, typecheck, build, integración con Redis + worker (`scripts/integration.sh`) y build de imágenes. |
+
 ## Arranque rápido
 
 ```bash
@@ -100,8 +117,9 @@ La interrupción es **temporal y automática**; la mitigación **permanente** re
 cd engine && pip install -r requirements.txt && pytest          # engine + sandbox end-to-end
 cd control-plane && npm ci && npm test                          # breaker, auditoría, proxy, aprobaciones, campañas
 cd frontend && npm ci && npm run build                          # typecheck + build
+PYBIN=python3 scripts/integration.sh                            # Redis + worker BullMQ separado (requiere redis-server)
 ```
 
 ## Uso responsable
 
-Los payloads son canarios inofensivos y las herramientas del agente de prueba son simuladas. Ejecuta campañas **solo contra sistemas propios o con autorización expresa**. Las API keys de ejemplo son para desarrollo: cámbialas antes de exponer el servicio. El estado de incidentes/aprobaciones es en memoria (la auditoría puede persistirse con `AUDIT_FILE`); para producción habría que añadir una base de datos.
+Los payloads son canarios inofensivos y las herramientas del agente de prueba son simuladas. Ejecuta campañas **solo contra sistemas propios o con autorización expresa**. Las API keys de ejemplo son para desarrollo: cámbialas antes de exponer el servicio. El estado se persiste en un fichero JSON (suficiente para una sola instancia); para alta disponibilidad o varias réplicas habría que migrarlo a una base de datos.

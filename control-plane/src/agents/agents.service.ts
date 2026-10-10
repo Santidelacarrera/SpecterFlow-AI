@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { Persistable, PersistenceService } from '../common/persistence.service';
 
 export interface Agent {
   id: string;
@@ -17,10 +18,23 @@ export interface GatewayRule {
 }
 
 @Injectable()
-export class AgentsService {
+export class AgentsService implements Persistable {
   private agents = new Map<string, Agent>();
   private blockedIps = new Set<string>();
   private rules: GatewayRule[] = [];
+
+  constructor(private readonly persistence: PersistenceService) {
+    persistence.register('agents', this);
+  }
+
+  exportState() {
+    return { agents: [...this.agents.values()], blockedIps: [...this.blockedIps], rules: this.rules };
+  }
+  importState(d: any) {
+    this.agents = new Map((d.agents ?? []).map((a: Agent) => [a.id, a]));
+    this.blockedIps = new Set(d.blockedIps ?? []);
+    this.rules = d.rules ?? [];
+  }
 
   register(id: string, url: string): Agent {
     if (!/^[a-z0-9][a-z0-9-_]{1,40}$/i.test(id)) throw new BadRequestException('invalid agent id');
@@ -33,6 +47,7 @@ export class AgentsService {
     if (!['http:', 'https:'].includes(u.protocol)) throw new BadRequestException('invalid url protocol');
     const agent: Agent = { id, url: u.origin + u.pathname.replace(/\/$/, ''), paused: false, keyVersion: 1, registeredAt: new Date().toISOString() };
     this.agents.set(id, agent);
+    this.persistence.touch();
     return agent;
   }
 
@@ -51,19 +66,23 @@ export class AgentsService {
   pause(id: string): void {
     const a = this.agents.get(id);
     if (a) a.paused = true;
+    this.persistence.touch();
   }
   resume(id: string): void {
     const a = this.agents.get(id);
     if (a) a.paused = false;
+    this.persistence.touch();
   }
   rotateKeys(id: string): number {
     const a = this.agents.get(id);
     if (!a) return 0;
+    this.persistence.touch();
     return ++a.keyVersion;
   }
 
   blockIp(ip: string): void {
     this.blockedIps.add(ip);
+    this.persistence.touch();
   }
   isBlocked(ip: string): boolean {
     return this.blockedIps.has(ip);
@@ -76,6 +95,7 @@ export class AgentsService {
     new RegExp(pattern); // valida
     const rule = { id: `rule-${this.rules.length + 1}`, agentId, pattern, reason, createdAt: new Date().toISOString() };
     this.rules.push(rule);
+    this.persistence.touch();
     return rule;
   }
   matchRule(agentId: string, prompt: string): GatewayRule | undefined {

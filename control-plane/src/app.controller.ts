@@ -1,4 +1,8 @@
-import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Req, Res, UnauthorizedException } from '@nestjs/common';
+import { Response } from 'express';
+import { cfg } from './common/config';
+import { EventsService } from './events/events.service';
+import { MetricsService } from './metrics/metrics.service';
 import { AgentsService } from './agents/agents.service';
 import { ApprovalsService } from './approvals/approvals.service';
 import { AuditService } from './audit/audit.service';
@@ -16,10 +20,32 @@ export class AppController {
     private readonly breaker: BreakerService,
     private readonly campaigns: CampaignsService,
     private readonly incidents: IncidentsService,
+    private readonly events: EventsService,
+    private readonly metrics: MetricsService,
   ) {}
 
   @Public() @Get('health') health() {
     return { status: 'ok', service: 'control-plane' };
+  }
+
+  /** Métricas Prometheus. Protegidas con METRICS_TOKEN (Bearer) si está definido; si no, requieren API key. */
+  @Public() @Get('metrics') metricsText(@Req() req: any, @Res() res: Response) {
+    const token = cfg().metricsToken;
+    const ok = token ? req.headers.authorization === `Bearer ${token}` : !!cfg().apiKeys[String(req.headers['x-api-key'])];
+    if (!ok) throw new UnauthorizedException();
+    res.type('text/plain; version=0.0.4').send(this.metrics.render());
+  }
+
+  /** Stream SSE de eventos en vivo (incidentes, breakers, aprobaciones). */
+  @Get('api/events') stream(@Req() req: any, @Res() res: Response) {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
+    res.write(': connected\n\n');
+    const off = this.events.subscribe((e) => res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`));
+    const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
+    req.on('close', () => {
+      clearInterval(ping);
+      off();
+    });
   }
 
   @Get('api/me') me(@Req() req: any) {

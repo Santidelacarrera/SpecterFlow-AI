@@ -32,8 +32,10 @@ export function App() {
     if (!key) return;
     api.me().then((m) => { setRole(m.role); sessionStorage.setItem('sf-key', key); }).catch((e) => { setRole(null); setError(e.message); });
     void refresh();
-    const t = setInterval(refresh, 3000);
-    return () => clearInterval(t);
+    // Actualización en vivo por SSE; el sondeo lento es solo red de seguridad.
+    const stop = api.stream(() => void refresh());
+    const t = setInterval(refresh, 20000);
+    return () => { stop(); clearInterval(t); };
   }, [key, api, refresh]);
 
   if (!role) return <Login onKey={setKey} error={error} />;

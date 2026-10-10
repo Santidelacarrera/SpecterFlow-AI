@@ -2,8 +2,10 @@ import { All, Controller, HttpException, Req, Res } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { AgentsService } from '../agents/agents.service';
 import { AuditService } from '../audit/audit.service';
-import { BreakerService, hashPrompt } from '../breaker/breaker.service';
-import { costUsd, estimateTokens } from '../common/config';
+import { BreakerService, hashPrompt, promptWords } from '../breaker/breaker.service';
+import { cfg, costUsd, estimateTokens } from '../common/config';
+import { EventsService } from '../events/events.service';
+import { MetricsService } from '../metrics/metrics.service';
 import { IncidentsService } from '../incidents/incidents.service';
 
 function extractPrompt(body: unknown): string {
@@ -24,6 +26,8 @@ export class ProxyController {
     private readonly breaker: BreakerService,
     private readonly incidents: IncidentsService,
     private readonly audit: AuditService,
+    private readonly metrics: MetricsService,
+    private readonly events: EventsService,
   ) {}
 
   @All(':agentId')
@@ -88,18 +92,52 @@ export class ProxyController {
 
     const trip = this.breaker.record(agentId, {
       promptHash: hashPrompt(promptText),
+      words: promptWords(promptText),
       promptPreview: promptText.slice(0, 120),
       costUsd: cost,
       ok: status < 400,
       sourceIp: ip,
       status,
     });
+    this.metrics.inc('specterflow_proxy_requests_total', { agent: agentId, status: String(status) });
+    this.metrics.inc('specterflow_tokens_total', { agent: agentId, direction: 'in' }, inTok);
+    this.metrics.inc('specterflow_tokens_total', { agent: agentId, direction: 'out' }, outTok);
+    this.metrics.inc('specterflow_cost_usd_total', { agent: agentId }, cost);
     if (trip) {
       this.audit.append('breaker', 'breaker.tripped', { agentId, reason: trip.reason, detail: trip.detail });
+      this.metrics.inc('specterflow_breaker_trips_total', { agent: agentId, reason: trip.reason });
+      this.events.emit('breaker', { agentId, reason: trip.reason }, `Circuit breaker ABIERTO en ${agentId}: ${trip.detail}`);
       this.incidents.fromTrip(trip);
     }
+    if (cfg().liveClassify && status < 400) void this.classifyLive(agentId, promptText, text);
 
     res.status(status).setHeader('x-sf-cost-usd', cost.toFixed(6)).setHeader('x-sf-tokens', `${inTok}/${outTok}`);
     res.type('application/json').send(text || JSON.stringify({ error: 'upstream unavailable' }));
+  }
+
+  /** Evaluación de intención sobre tráfico real vía engine (no bloquea la respuesta). */
+  private async classifyLive(agentId: string, prompt: string, rawReply: string): Promise<void> {
+    try {
+      let reply = rawReply;
+      let tool_calls: unknown[] = [];
+      try {
+        const j = JSON.parse(rawReply);
+        reply = String(j.reply ?? rawReply);
+        tool_calls = Array.isArray(j.tool_calls) ? j.tool_calls : [];
+      } catch {
+        /* texto plano */
+      }
+      const r = await fetch(`${cfg().engineUrl}/v1/classify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt, reply, tool_calls }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!r.ok) return;
+      const v = (await r.json()) as { classification: { exploited: boolean; severity: any; indicators: string[] } };
+      if (v.classification.exploited) this.incidents.fromLiveTraffic(agentId, v.classification.severity, v.classification.indicators, prompt, reply);
+    } catch {
+      /* el engine es opcional para el camino caliente */
+    }
   }
 }

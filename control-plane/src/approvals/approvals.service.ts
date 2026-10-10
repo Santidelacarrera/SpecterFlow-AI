@@ -2,7 +2,10 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { randomUUID } from 'crypto';
 import { AgentsService } from '../agents/agents.service';
 import { AuditService } from '../audit/audit.service';
-import { Role } from '../common/config';
+import { cfg, Role } from '../common/config';
+import { Persistable, PersistenceService } from '../common/persistence.service';
+import { EventsService } from '../events/events.service';
+import { MetricsService } from '../metrics/metrics.service';
 
 export type ActionType = 'PAUSE_AGENT' | 'BLOCK_IP' | 'ROTATE_KEYS' | 'PATCH_GATEWAY_RULE';
 
@@ -32,13 +35,26 @@ export interface Approval {
 type Proposal = Pick<Approval, 'incidentId' | 'action' | 'agentId' | 'params' | 'summary' | 'requiredRoles'>;
 
 @Injectable()
-export class ApprovalsService {
+export class ApprovalsService implements Persistable {
   private items: Approval[] = [];
 
   constructor(
     private readonly audit: AuditService,
     private readonly agents: AgentsService,
-  ) {}
+    private readonly persistence: PersistenceService,
+    private readonly events: EventsService,
+    private readonly metrics: MetricsService,
+  ) {
+    persistence.register('approvals', this);
+    metrics.gauge('specterflow_approvals_pending', {}, () => this.items.filter((a) => a.status === 'pending').length);
+  }
+
+  exportState() {
+    return this.items;
+  }
+  importState(d: Approval[]) {
+    this.items = d ?? [];
+  }
 
   propose(p: Proposal): Approval {
     // Evita saturar la bandeja: una misma acción pendiente sobre el mismo agente/parámetros se reutiliza.
@@ -49,6 +65,8 @@ export class ApprovalsService {
     const a: Approval = { id: randomUUID(), ...p, signatures: [], status: 'pending', createdAt: new Date().toISOString() };
     this.items.push(a);
     this.audit.append('system', 'approval.proposed', { id: a.id, action: a.action, agentId: a.agentId, requiredRoles: a.requiredRoles });
+    this.persistence.touch();
+    this.events.emit('approval', { id: a.id, status: a.status }, `Aprobación pendiente: ${a.action} sobre ${a.agentId} (firman ${a.requiredRoles.join('+')})`);
     return a;
   }
 
@@ -74,6 +92,8 @@ export class ApprovalsService {
 
     if (decision === 'reject') {
       a.status = 'rejected';
+      this.persistence.touch();
+      this.events.emit('approval', { id: a.id, status: a.status });
       return a;
     }
     const nowSigned = new Set(a.signatures.filter((s) => s.decision === 'approve').map((s) => s.signedAs));
@@ -81,6 +101,8 @@ export class ApprovalsService {
       a.status = 'approved';
       this.apply(a);
     }
+    this.persistence.touch();
+    this.events.emit('approval', { id: a.id, status: a.status });
     return a;
   }
 
@@ -102,5 +124,25 @@ export class ApprovalsService {
     }
     a.appliedAt = new Date().toISOString();
     this.audit.append('system', 'mitigation.applied', { id: a.id, action: a.action, agentId: a.agentId, params: a.params });
+    this.metrics.inc('specterflow_mitigations_applied_total', { action: a.action });
+    this.events.emit('mitigation', { id: a.id, action: a.action, agentId: a.agentId }, `Mitigación aplicada: ${a.action} sobre ${a.agentId}`);
+    void this.notifyExecutor(a);
+  }
+
+  /** Conector hacia sistemas reales (API Gateway, firewall, gestor de secretos) mediante webhook firmado por el control plane. */
+  private async notifyExecutor(a: Approval): Promise<void> {
+    const url = cfg().mitigationWebhookUrl;
+    if (!url) return;
+    try {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-internal-token': cfg().internalToken },
+        body: JSON.stringify({ approvalId: a.id, action: a.action, agentId: a.agentId, params: a.params, signatures: a.signatures }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      this.audit.append('system', r.ok ? 'mitigation.executor_ok' : 'mitigation.executor_failed', { id: a.id, status: r.status });
+    } catch (e) {
+      this.audit.append('system', 'mitigation.executor_failed', { id: a.id, error: String(e) });
+    }
   }
 }

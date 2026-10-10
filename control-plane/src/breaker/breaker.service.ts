@@ -13,6 +13,7 @@ export interface RequestRecord {
   ok: boolean;
   sourceIp: string;
   status: number;
+  words?: string[];
 }
 
 export interface Trip {
@@ -30,6 +31,16 @@ interface AgentBreaker {
   records: RequestRecord[];
   lastTrip?: Trip;
 }
+
+export const promptWords = (p: string): string[] => [...new Set(p.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])].slice(0, 64);
+
+export const jaccard = (a: string[], b: string[]): number => {
+  if (!a.length && !b.length) return 1;
+  const B = new Set(b);
+  let inter = 0;
+  for (const w of a) if (B.has(w)) inter++;
+  return inter / (a.length + b.length - inter);
+};
 
 export const hashPrompt = (p: string) => createHash('sha1').update(p.trim().toLowerCase()).digest('hex').slice(0, 12);
 
@@ -88,6 +99,15 @@ export class BreakerService {
     const [loopHash, loopN] = [...counts.entries()].sort((x, y) => y[1] - x[1])[0] ?? ['', 0];
     if (loopN >= c.loopRepeat) {
       return this.trip(agentId, a, 'infinite_loop', `Prompt idéntico (${loopHash}) repetido ${loopN} veces en ${c.windowSec}s`);
+    }
+    // Bucle "semántico": prompts casi idénticos (variaciones mínimas) que un agente reenvía una y otra vez.
+    const last = a.records.slice(-100).filter((r) => r.words?.length);
+    const cur = last[last.length - 1];
+    if (cur?.words) {
+      const similar = last.filter((r) => jaccard(cur.words!, r.words!) >= cfg().loopSimilarity).length;
+      if (similar >= c.loopRepeat) {
+        return this.trip(agentId, a, 'infinite_loop', `${similar} prompts casi idénticos (similitud ≥ ${cfg().loopSimilarity}) en ${c.windowSec}s`);
+      }
     }
     if (a.records.length >= c.minRequests) {
       const fails = a.records.filter((r) => !r.ok).length / a.records.length;

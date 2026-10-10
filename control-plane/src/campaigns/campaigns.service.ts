@@ -5,6 +5,8 @@ import { randomUUID } from 'crypto';
 import { AgentsService } from '../agents/agents.service';
 import { AuditService } from '../audit/audit.service';
 import { cfg } from '../common/config';
+import { Persistable, PersistenceService } from '../common/persistence.service';
+import { EventsService } from '../events/events.service';
 import { IncidentsService } from '../incidents/incidents.service';
 
 export interface CampaignJob {
@@ -40,7 +42,7 @@ export async function runCampaignJob(job: CampaignJob, engineUrl: string): Promi
 }
 
 @Injectable()
-export class CampaignsService implements OnModuleInit, OnModuleDestroy {
+export class CampaignsService implements OnModuleInit, OnModuleDestroy, Persistable {
   private campaigns = new Map<string, Campaign>();
   private queue?: Queue;
   private worker?: Worker;
@@ -50,7 +52,21 @@ export class CampaignsService implements OnModuleInit, OnModuleDestroy {
     private readonly agents: AgentsService,
     private readonly incidents: IncidentsService,
     private readonly audit: AuditService,
-  ) {}
+    private readonly persistence: PersistenceService,
+    private readonly events: EventsService,
+  ) {
+    persistence.register('campaigns', this);
+  }
+
+  exportState() {
+    return [...this.campaigns.values()];
+  }
+  importState(d: Campaign[]) {
+    // Las campañas que estaban en curso al caer el proceso se marcan como fallidas.
+    this.campaigns = new Map(
+      (d ?? []).map((c) => [c.id, ['queued', 'running'].includes(c.status) ? { ...c, status: 'failed' as const, error: 'interrumpida por reinicio' } : c]),
+    );
+  }
 
   onModuleInit() {
     const { redisUrl } = cfg();
@@ -89,6 +105,7 @@ export class CampaignsService implements OnModuleInit, OnModuleDestroy {
     const c: Campaign = { id: randomUUID(), targetUrl, agentId: agent?.id, status: 'queued', createdAt: new Date().toISOString() };
     this.campaigns.set(c.id, c);
     this.audit.append('system', 'campaign.queued', { id: c.id, targetUrl });
+    this.persistence.touch();
     const job: CampaignJob = { campaignId: c.id, targetUrl, agentId: agent?.id, attackIds, budgetUsd };
 
     if (this.queue) {
@@ -119,6 +136,8 @@ export class CampaignsService implements OnModuleInit, OnModuleDestroy {
       c.costUsd = report.total_usage?.cost_usd;
     }
     this.audit.append('system', 'campaign.completed', { id: job.campaignId, exploited: report.exploited_count, incidents: created.length });
+    this.persistence.touch();
+    this.events.emit('campaign', { id: job.campaignId, status: 'done', exploited: report.exploited_count });
     return { incidents: created.length };
   }
 
@@ -129,5 +148,7 @@ export class CampaignsService implements OnModuleInit, OnModuleDestroy {
       c.error = err instanceof Error ? err.message : String(err);
     }
     this.audit.append('system', 'campaign.failed', { id: campaignId, error: String(err) });
+    this.persistence.touch();
+    this.events.emit('campaign', { id: campaignId, status: 'failed' });
   }
 }

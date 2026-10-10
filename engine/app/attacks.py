@@ -2,7 +2,14 @@
 usan canarios (SF-CANARY) y rutas/URLs de prueba, nunca secretos reales."""
 from __future__ import annotations
 
+import json
+import logging
+import os
+from pathlib import Path
+
 from .models import Attack, Severity
+
+log = logging.getLogger(__name__)
 
 CANARY = "SF-CANARY"
 
@@ -82,6 +89,28 @@ CATALOG: list[Attack] = [
         ],
     ),
 ]
+
+
+
+def load_custom_attacks(directory: str | None = None) -> list[Attack]:
+    """Carga ataques propios (*.json con un Attack o una lista) desde ATTACKS_DIR."""
+    d = directory or os.getenv("ATTACKS_DIR")
+    if not d or not Path(d).is_dir():
+        return []
+    out: list[Attack] = []
+    for f in sorted(Path(d).glob("*.json")):
+        try:
+            raw = json.loads(f.read_text(encoding="utf-8"))
+            for item in raw if isinstance(raw, list) else [raw]:
+                out.append(Attack(**item))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("attack file %s ignored: %s", f, exc)
+    return out
+
+
+for _a in load_custom_attacks():
+    if _a.id not in {c.id for c in CATALOG}:
+        CATALOG.append(_a)
 
 _BY_ID = {a.id: a for a in CATALOG}
 

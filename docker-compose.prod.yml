@@ -1,0 +1,13 @@
+# Overlay de producción:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Exige claves explícitas: el control plane rechaza arrancar con claves de ejemplo.
+services:
+  control-plane:
+    environment:
+      NODE_ENV: production
+      API_KEYS: ${API_KEYS:?define API_KEYS con claves de >=24 caracteres (clave:ROL,...)}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?define INTERNAL_TOKEN}
+      METRICS_TOKEN: ${METRICS_TOKEN:?define METRICS_TOKEN}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+  worker:
+    environment:
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?define INTERNAL_TOKEN}

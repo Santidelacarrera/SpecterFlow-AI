@@ -4,6 +4,9 @@ import { AuditService } from '../audit/audit.service';
 import { Trip } from '../breaker/breaker.service';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { AgentsService } from '../agents/agents.service';
+import { Persistable, PersistenceService } from '../common/persistence.service';
+import { EventsService } from '../events/events.service';
+import { MetricsService } from '../metrics/metrics.service';
 
 export type Sev = 'none' | 'low' | 'medium' | 'high' | 'critical';
 
@@ -30,14 +33,52 @@ const REMEDIATION_RULES: Record<string, string> = {
 };
 
 @Injectable()
-export class IncidentsService {
+export class IncidentsService implements Persistable {
   private incidents: Incident[] = [];
 
   constructor(
     private readonly audit: AuditService,
     private readonly approvals: ApprovalsService,
     private readonly agents: AgentsService,
-  ) {}
+    private readonly persistence: PersistenceService,
+    private readonly events: EventsService,
+    private readonly metrics: MetricsService,
+  ) {
+    persistence.register('incidents', this);
+  }
+
+  exportState() {
+    return this.incidents;
+  }
+  importState(d: Incident[]) {
+    this.incidents = d ?? [];
+  }
+
+  private record(i: Incident): void {
+    this.incidents.push(i);
+    this.persistence.touch();
+    this.metrics.inc('specterflow_incidents_total', { kind: i.kind, severity: i.severity });
+    this.events.emit('incident', { id: i.id, severity: i.severity }, `Incidente ${i.severity.toUpperCase()}: ${i.title}`);
+  }
+
+  /** Incidente por tráfico real detectado como malicioso (clasificación en vivo). */
+  fromLiveTraffic(agentId: string, severity: Sev, indicators: string[], prompt: string, reply: string): Incident {
+    const incident: Incident = {
+      id: randomUUID(),
+      kind: 'redteam_finding',
+      agentId,
+      target: agentId,
+      severity,
+      title: `Tráfico real sospechoso en ${agentId} (${indicators.join(', ')})`,
+      createdAt: new Date().toISOString(),
+      costUsd: 0,
+      status: 'open',
+      evidence: { live: true, indicators, prompt: prompt.slice(0, 2000), reply: reply.slice(0, 2000) },
+    };
+    this.record(incident);
+    this.audit.append('system', 'incident.created', { id: incident.id, kind: 'live_traffic', severity });
+    return incident;
+  }
 
   list(): Incident[] {
     return [...this.incidents].reverse();
@@ -60,7 +101,7 @@ export class IncidentsService {
       status: 'contained',
       evidence: { reason: trip.reason, detail: trip.detail, requests: trip.evidence, topSourceIp: trip.topSourceIp },
     };
-    this.incidents.push(incident);
+    this.record(incident);
     this.audit.append('system', 'incident.created', { id: incident.id, kind: incident.kind, reason: trip.reason });
 
     const financial = trip.reason !== 'failure_rate';
@@ -113,7 +154,7 @@ export class IncidentsService {
         },
         postmortem: report.postmortem,
       };
-      this.incidents.push(incident);
+      this.record(incident);
       created.push(incident);
       this.audit.append('system', 'incident.created', { id: incident.id, kind: incident.kind, attack: r.attack_id, severity: c.severity });
 

@@ -6,6 +6,9 @@ services:
 
   engine:
     build: ./engine
+    mem_limit: 512m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLASSIFIER_MODEL: ${CLASSIFIER_MODEL:-claude-haiku-5-5}
@@ -19,6 +22,11 @@ services:
       API_KEYS: ${API_KEYS:-secops-key:SECOPS,finops-key:FINOPS,admin-key:ADMIN,viewer-key:VIEWER}
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
       AUDIT_FILE: /data/audit.jsonl
+      STATE_FILE: /data/state.json
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      MITIGATION_WEBHOOK_URL: ${MITIGATION_WEBHOOK_URL:-}
+      LIVE_CLASSIFY: ${LIVE_CLASSIFY:-false}
+      TRUST_PROXY: "true"
       TARGET_ALLOWLIST: vulnerable-agent,hardened-agent
       BUDGET_USD: ${BUDGET_USD:-5}
       BUDGET_WINDOW_SEC: ${BUDGET_WINDOW_SEC:-60}
@@ -27,6 +35,8 @@ services:
     volumes: [audit:/data]
     ports: ["3000:3000"]
     depends_on: [redis, engine]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
     networks: [internal, public]
 
   worker:
@@ -50,11 +60,23 @@ services:
   vulnerable-agent:
     build: ./sandbox/vulnerable-agent
     environment: { VULNERABLE: "true" }
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 100
     networks: [internal]
 
   hardened-agent:
     build: ./sandbox/vulnerable-agent
     environment: { VULNERABLE: "false" }
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 100
     networks: [internal]
 
 networks:
