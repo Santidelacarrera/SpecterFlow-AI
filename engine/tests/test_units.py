@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from app.attacks import CATALOG, get_attacks, load_custom_attacks
 from app.classifier import classify_heuristic
 from app.models import Severity
@@ -29,11 +30,8 @@ def test_cost_math():
 
 
 def test_unknown_attack_id():
-    try:
+    with pytest.raises(KeyError):
         get_attacks(["NOPE"])
-        assert False
-    except KeyError:
-        pass
 
 
 def test_custom_attacks_loaded_and_bad_files_ignored(tmp_path):

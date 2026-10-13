@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .models import AttackResult, Severity, TokenUsage
 
-REMEDIATION = {
+REMEDIATION = {  # nosec B105 - textos de remediación, no credenciales
     "prompt_injection": "Aislar contenido no confiable del system prompt, aplicar delimitadores y un filtro de instrucciones en el API Gateway.",
     "secret_exfiltration": "Rotar las claves expuestas del agente y añadir redacción de secretos en la salida (DLP).",
     "privilege_escalation": "Aplicar allow-list de herramientas MCP por rol y exigir confirmación humana en herramientas destructivas.",

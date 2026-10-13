@@ -1,0 +1,9 @@
+target-version = "py312"
+line-length = 160
+
+[lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+  "B008",  # Depends() en argumentos por defecto es el idioma de FastAPI
+  "E501",
+]

@@ -1,5 +1,7 @@
 # SpecterFlow AI
 
+> Un producto de **Nexus Security & AI Lab** — desarrollo web, automatización, integración de IA, agentes de IA y ciberseguridad. Costo $0: todo el flujo funciona en local, con datos sintéticos y sin servicios de pago.
+
 **Plataforma de Red Teaming Autónomo, Orquestación de Incidencias y Gobernanza Financiera de Agentes**
 
 ```
@@ -127,17 +129,35 @@ docker compose up --build
 
 La interrupción es **temporal y automática**; la mitigación **permanente** requiere firmas: pausa por presupuesto/bucle → SECOPS + FINOPS; el resto → SECOPS.
 
-## Tests
+## Instalación y pruebas (reproducible)
+
+Requisitos: Node 22, Python ≥ 3.12, `redis-server` (para las pruebas de integración) y, opcionalmente, Postgres 16 (tests de alta disponibilidad). Docker solo hace falta para `docker compose`.
 
 ```bash
-cd engine && pip install -r requirements.txt && pytest          # engine + sandbox end-to-end
-cd control-plane && npm ci && npm test                          # breaker, auditoría, proxy, aprobaciones, campañas
-cd frontend && npm ci && npm run build                          # typecheck + build
-cd executor && pip install -r requirements.txt && pytest        # conectores (Kong/Vault/NGINX)
-PYBIN=python3 scripts/integration.sh                            # Redis + worker + executor (requiere redis-server)
-DATABASE_URL=postgres://... scripts/integration-ha.sh           # 2 réplicas + Postgres
-TEST_DATABASE_URL=postgres://... npm test                       # incluye los tests HA contra Postgres
+# 1) Dependencias
+pip install -r requirements-dev.txt            # engine + executor + sandbox + ruff/bandit/pip-audit
+(cd control-plane && npm ci) && (cd frontend && npm ci)
+
+# 2) Pruebas por componente
+(cd engine && pytest -q)                        # 12 passed
+(cd executor && pytest -q)                      # 12 passed (conectores Kong/NGINX/Vault)
+(cd control-plane && npx jest)                  # 24 passed (4 requieren TEST_DATABASE_URL; si no, se omiten)
+(cd frontend && npm run build)                  # typecheck + build
+
+# 3) Flujo principal de extremo a extremo (13 pasos, datos sintéticos) → docs/evidence/main-flow-run.md
+PYBIN=python3 scripts/e2e-main-flow.sh
+
+# 4) Integraciones
+PYBIN=python3 scripts/integration.sh                           # Redis + worker BullMQ + executor
+DATABASE_URL=postgres://… PYBIN=python3 scripts/integration-ha.sh   # 2 réplicas + Postgres
+
+# 5) Todo junto (pruebas + lint + seguridad) → docs/evidence/verification.md
+PYBIN=python3 TEST_DATABASE_URL=postgres://… scripts/verify-all.sh
 ```
+
+Lint y seguridad: `ruff check engine executor sandbox` · `bandit -r engine/app executor/app sandbox/vulnerable-agent -ll` · `pip-audit -r engine/requirements.txt …` · `npm audit --omit=dev` (control plane) · `npm audit` (frontend).
+
+Documentación de la ejecución y los datos: [`docs/DATOS.md`](docs/DATOS.md) (qué datos se usan: todos sintéticos), [`docs/NOTA-SpecterFlow-AI.md`](docs/NOTA-SpecterFlow-AI.md) (definición de terminado, bitácora de decisiones y pendientes) y [`docs/evidence/`](docs/evidence/) (salidas reales de las últimas verificaciones).
 
 ## Uso responsable
 
