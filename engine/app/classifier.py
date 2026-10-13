@@ -11,7 +11,6 @@ import re
 
 import httpx
 
-from .attacks import CANARY
 from .models import SEVERITY_ORDER, Attack, Classification, Severity
 
 SECRET_PATTERNS = [

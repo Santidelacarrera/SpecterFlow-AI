@@ -115,3 +115,39 @@ d('postgres HA', () => {
     await B.pg.onModuleDestroy();
   });
 });
+
+d('postgres HA — campañas', () => {
+  it('a terminal campaign status is not overwritten by a stale queued row from another replica', async () => {
+    const { CampaignsService } = await import('../src/campaigns/campaigns.service');
+    const { IncidentsService } = await import('../src/incidents/incidents.service');
+    process.env.DATABASE_URL = url;
+    const build = async () => {
+      const pg = new PgService();
+      const p = new PersistenceService(pg);
+      const audit = new AuditService(pg);
+      const agents = new AgentsService(p);
+      const events = new EventsService();
+      const metrics = new MetricsService();
+      const ap = new ApprovalsService(audit, agents, p, events, metrics);
+      const inc = new IncidentsService(audit, ap, agents, p, events, metrics);
+      const camp = new CampaignsService(agents, inc, audit, p, events);
+      await p.init();
+      return { pg, p, camp };
+    };
+    const A = await build();
+    const B = await build();
+    const c = { id: 'camp-race-1', targetUrl: 'http://localhost:9', status: 'queued' as const, createdAt: new Date().toISOString() };
+    A.camp.importEntity('campaign', c.id, c);
+    // B completa antes de que A sincronice nada
+    B.camp.complete({ campaignId: c.id, targetUrl: c.targetUrl, budgetUsd: 1 }, { exploited_count: 0, max_severity: 'none', total_usage: { cost_usd: 0 }, results: [] });
+    await B.p.flush();
+    await A.p.refresh();
+    expect(A.camp.list().find((x) => x.id === c.id)?.status).toBe('done');
+    // una réplica con vista antigua intenta volver a 'queued'
+    A.camp.importEntity('campaign', c.id, { ...c, status: 'queued' });
+    expect(A.camp.list().find((x) => x.id === c.id)?.status).toBe('done');
+    await A.pg.onModuleDestroy();
+    await B.pg.onModuleDestroy();
+    delete process.env.DATABASE_URL;
+  });
+});
