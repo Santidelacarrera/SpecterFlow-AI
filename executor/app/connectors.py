@@ -11,10 +11,10 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
-import subprocess
+import subprocess  # nosec B404 - se ejecuta solo NGINX_RELOAD_CMD (config del operador), sin shell
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import httpx
 
@@ -25,7 +25,7 @@ ClientFactory = Callable[[], httpx.AsyncClient]
 
 
 def _digest(s: str) -> str:
-    return hashlib.sha1(s.encode()).hexdigest()[:10]
+    return hashlib.sha256(s.encode()).hexdigest()[:10]
 
 
 # ----------------------------------------------------------------------------- Kong
@@ -129,7 +129,7 @@ class NginxConnector:
 
     def _read(self, f: str) -> list[str]:
         p = self.dir / f
-        return [l for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+        return [line for line in p.read_text().splitlines() if line.strip()] if p.exists() else []
 
     def _write(self, f: str, lines: list[str]) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -141,7 +141,7 @@ class NginxConnector:
     def _reload(self) -> str:
         if not self.cfg.nginx_reload_cmd:
             return "sin NGINX_RELOAD_CMD (recarga manual)"
-        r = subprocess.run(self.cfg.nginx_reload_cmd.split(), capture_output=True, text=True, timeout=20)  # noqa: S603
+        r = subprocess.run(self.cfg.nginx_reload_cmd.split(), capture_output=True, text=True, timeout=20, check=False)  # nosec B603
         if r.returncode != 0:
             raise RuntimeError(f"reload failed: {r.stderr[:200]}")
         return "nginx recargado"

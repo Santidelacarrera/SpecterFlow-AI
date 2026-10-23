@@ -35,9 +35,10 @@ export class ProxyController {
     return this.handle(req, res, '');
   }
 
-  @All(':agentId/*')
+  @All(':agentId/*path')
   nested(@Req() req: Request, @Res() res: Response) {
-    return this.handle(req, res, (req.params as any)[0] ?? '');
+    const p = (req.params as Record<string, unknown>).path;
+    return this.handle(req, res, Array.isArray(p) ? p.join('/') : String(p ?? ''));
   }
 
   private async handle(req: Request, res: Response, path: string) {

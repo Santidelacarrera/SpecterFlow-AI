@@ -13,6 +13,10 @@ jobs:
       - run: pip install -r engine/requirements.txt -r sandbox/vulnerable-agent/requirements.txt
       - run: pytest -q
         working-directory: engine
+      - run: pip install ruff==0.17.0 bandit==1.9.4 pip-audit==2.10.1
+      - run: ruff check engine executor sandbox
+      - run: bandit -q -r engine/app executor/app sandbox/vulnerable-agent -ll
+      - run: pip-audit -r engine/requirements.txt -r executor/requirements.txt -r sandbox/vulnerable-agent/requirements.txt
 
   executor:
     runs-on: ubuntu-latest
@@ -45,6 +49,10 @@ jobs:
         working-directory: control-plane
       - run: npm test
         working-directory: control-plane
+      - run: npm audit --omit=dev
+        working-directory: control-plane
+      - run: npm audit --audit-level=high
+        working-directory: control-plane
 
   frontend:
     runs-on: ubuntu-latest
@@ -53,6 +61,8 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json }
       - run: npm ci && npm run build
+        working-directory: frontend
+      - run: npm audit --audit-level=high
         working-directory: frontend
 
   integration:
@@ -75,6 +85,8 @@ jobs:
       - run: pip install -r engine/requirements.txt -r executor/requirements.txt -r sandbox/vulnerable-agent/requirements.txt
       - run: npm ci
         working-directory: control-plane
+      - run: scripts/e2e-main-flow.sh
+        env: { EVIDENCE_FILE: /tmp/main-flow-run.md }
       - run: scripts/integration.sh
       - run: scripts/integration-ha.sh
         env: { DATABASE_URL: "postgres://postgres:ci@localhost:5432/sf" }
