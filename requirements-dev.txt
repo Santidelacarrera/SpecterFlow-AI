@@ -1,0 +1,7 @@
+# Herramientas de verificación (lint/SAST/auditoría) — se instalan junto a los requirements de cada servicio
+-r engine/requirements.txt
+-r executor/requirements.txt
+-r sandbox/vulnerable-agent/requirements.txt
+ruff==0.17.0
+bandit==1.9.4
+pip-audit==2.10.1

@@ -6,7 +6,6 @@ import time
 
 import pytest
 import uvicorn
-
 from app.models import CampaignRequest, Severity
 from app.runner import run_campaign
 

@@ -64,6 +64,9 @@ export class CampaignsService implements OnModuleInit, OnModuleDestroy, Persista
     return [...this.campaigns.values()].map((c) => ({ kind: 'campaign', id: c.id, data: c }));
   }
   importEntity(_kind: string, id: string, data: Campaign) {
+    // Los estados finales no retroceden (evita que una réplica con una vista antigua pise un 'done'/'failed').
+    const cur = this.campaigns.get(id);
+    if (cur && ['done', 'failed'].includes(cur.status) && ['queued', 'running'].includes(data.status)) return;
     // Una campaña "en curso" desde hace más de CAMPAIGN_STALE_MIN minutos (proceso caído) se da por fallida.
     const stale = Date.now() - Date.parse(data.createdAt) > Number(process.env.CAMPAIGN_STALE_MIN ?? 10) * 60_000;
     this.campaigns.set(id, ['queued', 'running'].includes(data.status) && stale ? { ...data, status: 'failed', error: 'interrumpida (sin finalizar)' } : data);
@@ -106,7 +109,9 @@ export class CampaignsService implements OnModuleInit, OnModuleDestroy, Persista
     const c: Campaign = { id: randomUUID(), targetUrl, agentId: agent?.id, status: 'queued', createdAt: new Date().toISOString() };
     this.campaigns.set(c.id, c);
     this.audit.append('system', 'campaign.queued', { id: c.id, targetUrl });
-    this.persistence.touch();
+    // El registro debe estar en el almacén ANTES de encolar: si el worker termina antes de la escritura diferida,
+    // otra réplica podría sobrescribir el resultado 'done' con este 'queued'.
+    await this.persistence.flush();
     const job: CampaignJob = { campaignId: c.id, targetUrl, agentId: agent?.id, attackIds, budgetUsd };
 
     if (this.queue) {
